@@ -1,3 +1,5 @@
+import uuid
+
 import pytest
 from django.conf.urls import url
 from django.test import RequestFactory, TestCase, override_settings
@@ -5,6 +7,8 @@ from django.utils.translation import gettext_lazy as _
 
 from rest_framework import filters, generics, pagination, routers, serializers
 from rest_framework.compat import uritemplate
+from rest_framework.parsers import JSONParser, MultiPartParser
+from rest_framework.renderers import JSONRenderer, OpenAPIRenderer
 from rest_framework.request import Request
 from rest_framework.schemas.openapi import AutoSchema, SchemaGenerator
 
@@ -42,12 +46,38 @@ class TestBasics(TestCase):
 
 class TestFieldMapping(TestCase):
     def test_list_field_mapping(self):
+        uuid1 = uuid.uuid4()
+        uuid2 = uuid.uuid4()
         inspector = AutoSchema()
         cases = [
             (serializers.ListField(), {'items': {}, 'type': 'array'}),
             (serializers.ListField(child=serializers.BooleanField()), {'items': {'type': 'boolean'}, 'type': 'array'}),
             (serializers.ListField(child=serializers.FloatField()), {'items': {'type': 'number'}, 'type': 'array'}),
             (serializers.ListField(child=serializers.CharField()), {'items': {'type': 'string'}, 'type': 'array'}),
+            (serializers.ListField(child=serializers.IntegerField(max_value=4294967295)),
+             {'items': {'type': 'integer', 'maximum': 4294967295, 'format': 'int64'}, 'type': 'array'}),
+            (serializers.ListField(child=serializers.ChoiceField(choices=[('a', 'Choice A'), ('b', 'Choice B')])),
+             {'items': {'enum': ['a', 'b'], 'type': 'string'}, 'type': 'array'}),
+            (serializers.ListField(child=serializers.ChoiceField(choices=[(1, 'One'), (2, 'Two')])),
+             {'items': {'enum': [1, 2], 'type': 'integer'}, 'type': 'array'}),
+            (serializers.ListField(child=serializers.ChoiceField(choices=[(1.1, 'First'), (2.2, 'Second')])),
+             {'items': {'enum': [1.1, 2.2], 'type': 'number'}, 'type': 'array'}),
+            (serializers.ListField(child=serializers.ChoiceField(choices=[(True, 'true'), (False, 'false')])),
+             {'items': {'enum': [True, False], 'type': 'boolean'}, 'type': 'array'}),
+            (serializers.ListField(child=serializers.ChoiceField(choices=[(uuid1, 'uuid1'), (uuid2, 'uuid2')])),
+             {'items': {'enum': [uuid1, uuid2]}, 'type': 'array'}),
+            (serializers.ListField(child=serializers.ChoiceField(choices=[(1, 'One'), ('a', 'Choice A')])),
+             {'items': {'enum': [1, 'a']}, 'type': 'array'}),
+            (serializers.ListField(child=serializers.ChoiceField(choices=[
+                (1, 'One'), ('a', 'Choice A'), (1.1, 'First'), (1.1, 'First'), (1, 'One'), ('a', 'Choice A'), (1, 'One')
+            ])),
+                {'items': {'enum': [1, 'a', 1.1]}, 'type': 'array'}),
+            (serializers.ListField(child=serializers.ChoiceField(choices=[
+                (1, 'One'), (2, 'Two'), (3, 'Three'), (2, 'Two'), (3, 'Three'), (1, 'One'),
+            ])),
+                {'items': {'enum': [1, 2, 3], 'type': 'integer'}, 'type': 'array'}),
+            (serializers.IntegerField(min_value=2147483648),
+             {'type': 'integer', 'minimum': 2147483648, 'format': 'int64'}),
         ]
         for field, mapping in cases:
             with self.subTest(field=field):
@@ -62,6 +92,19 @@ class TestFieldMapping(TestCase):
         data = inspector._map_serializer(Serializer())
         assert isinstance(data['properties']['text']['description'], str), "description must be str"
 
+    def test_boolean_default_field(self):
+        class Serializer(serializers.Serializer):
+            default_true = serializers.BooleanField(default=True)
+            default_false = serializers.BooleanField(default=False)
+            without_default = serializers.BooleanField()
+
+        inspector = AutoSchema()
+
+        data = inspector._map_serializer(Serializer())
+        assert data['properties']['default_true']['default'] is True, "default must be true"
+        assert data['properties']['default_false']['default'] is False, "default must be false"
+        assert 'default' not in data['properties']['without_default'], "default must not be defined"
+
 
 @pytest.mark.skipif(uritemplate is None, reason='uritemplate not installed.')
 class TestOperationIntrospection(TestCase):
@@ -71,7 +114,7 @@ class TestOperationIntrospection(TestCase):
         method = 'GET'
 
         view = create_view(
-            views.ExampleListView,
+            views.DocStringExampleListView,
             method,
             create_request(path)
         )
@@ -80,7 +123,8 @@ class TestOperationIntrospection(TestCase):
 
         operation = inspector.get_operation(path, method)
         assert operation == {
-            'operationId': 'listExamples',
+            'operationId': 'listDocStringExamples',
+            'description': 'A description of my GET operation.',
             'parameters': [],
             'responses': {
                 '200': {
@@ -102,23 +146,38 @@ class TestOperationIntrospection(TestCase):
         method = 'GET'
 
         view = create_view(
-            views.ExampleDetailView,
+            views.DocStringExampleDetailView,
             method,
             create_request(path)
         )
         inspector = AutoSchema()
         inspector.view = view
 
-        parameters = inspector._get_path_parameters(path, method)
-        assert parameters == [{
-            'description': '',
-            'in': 'path',
-            'name': 'id',
-            'required': True,
-            'schema': {
-                'type': 'string',
+        operation = inspector.get_operation(path, method)
+        assert operation == {
+            'operationId': 'RetrieveDocStringExampleDetail',
+            'description': 'A description of my GET operation.',
+            'parameters': [{
+                'description': '',
+                'in': 'path',
+                'name': 'id',
+                'required': True,
+                'schema': {
+                    'type': 'string',
+                },
+            }],
+            'responses': {
+                '200': {
+                    'description': '',
+                    'content': {
+                        'application/json': {
+                            'schema': {
+                            },
+                        },
+                    },
+                },
             },
-        }]
+        }
 
     def test_request_body(self):
         path = '/'
@@ -276,6 +335,7 @@ class TestOperationIntrospection(TestCase):
                         'schema': {
                             'type': 'array',
                             'items': {
+                                'type': 'object',
                                 'properties': {
                                     'text': {
                                         'type': 'string',
@@ -327,6 +387,7 @@ class TestOperationIntrospection(TestCase):
                             'item': {
                                 'type': 'array',
                                 'items': {
+                                    'type': 'object',
                                     'properties': {
                                         'text': {
                                             'type': 'string',
@@ -363,6 +424,90 @@ class TestOperationIntrospection(TestCase):
                 'description': '',
             },
         }
+
+    def test_parser_mapping(self):
+        """Test that view's parsers are mapped to OA media types"""
+        path = '/{id}/'
+        method = 'POST'
+
+        class View(generics.CreateAPIView):
+            serializer_class = views.ExampleSerializer
+            parser_classes = [JSONParser, MultiPartParser]
+
+        view = create_view(
+            View,
+            method,
+            create_request(path),
+        )
+        inspector = AutoSchema()
+        inspector.view = view
+
+        request_body = inspector._get_request_body(path, method)
+
+        assert len(request_body['content'].keys()) == 2
+        assert 'multipart/form-data' in request_body['content']
+        assert 'application/json' in request_body['content']
+
+    def test_renderer_mapping(self):
+        """Test that view's renderers are mapped to OA media types"""
+        path = '/{id}/'
+        method = 'GET'
+
+        class View(generics.CreateAPIView):
+            serializer_class = views.ExampleSerializer
+            renderer_classes = [JSONRenderer]
+
+        view = create_view(
+            View,
+            method,
+            create_request(path),
+        )
+        inspector = AutoSchema()
+        inspector.view = view
+
+        responses = inspector._get_responses(path, method)
+        # TODO this should be changed once the multiple response
+        # schema support is there
+        success_response = responses['200']
+
+        assert len(success_response['content'].keys()) == 1
+        assert 'application/json' in success_response['content']
+
+    def test_openapi_yaml_rendering_without_aliases(self):
+        renderer = OpenAPIRenderer()
+
+        reused_object = {'test': 'test'}
+        data = {
+            'o1': reused_object,
+            'o2': reused_object,
+        }
+        assert (
+            renderer.render(data) == b'o1:\n  test: test\no2:\n  test: test\n' or
+            renderer.render(data) == b'o2:\n  test: test\no1:\n  test: test\n'  # py <= 3.5
+        )
+
+    def test_serializer_filefield(self):
+        path = '/{id}/'
+        method = 'POST'
+
+        class ItemSerializer(serializers.Serializer):
+            attachment = serializers.FileField()
+
+        class View(generics.CreateAPIView):
+            serializer_class = ItemSerializer
+
+        view = create_view(
+            View,
+            method,
+            create_request(path),
+        )
+        inspector = AutoSchema()
+        inspector.view = view
+
+        request_body = inspector._get_request_body(path, method)
+        mp_media = request_body['content']['multipart/form-data']
+        attachment = mp_media['schema']['properties']['attachment']
+        assert attachment['format'] == 'binary'
 
     def test_retrieve_response_body_generation(self):
         """
@@ -402,6 +547,7 @@ class TestOperationIntrospection(TestCase):
                 'content': {
                     'application/json': {
                         'schema': {
+                            'type': 'object',
                             'properties': {
                                 'text': {
                                     'type': 'string',
@@ -461,6 +607,38 @@ class TestOperationIntrospection(TestCase):
         assert properties['date']['type'] == properties['datetime']['type'] == 'string'
         assert properties['date']['format'] == 'date'
         assert properties['datetime']['format'] == 'date-time'
+
+    def test_serializer_hstorefield(self):
+        path = '/'
+        method = 'GET'
+        view = create_view(
+            views.ExampleGenericAPIView,
+            method,
+            create_request(path),
+        )
+        inspector = AutoSchema()
+        inspector.view = view
+
+        responses = inspector._get_responses(path, method)
+        response_schema = responses['200']['content']['application/json']['schema']
+        properties = response_schema['items']['properties']
+        assert properties['hstore']['type'] == 'object'
+
+    def test_serializer_callable_default(self):
+        path = '/'
+        method = 'GET'
+        view = create_view(
+            views.ExampleGenericAPIView,
+            method,
+            create_request(path),
+        )
+        inspector = AutoSchema()
+        inspector.view = view
+
+        responses = inspector._get_responses(path, method)
+        response_schema = responses['200']['content']['application/json']['schema']
+        properties = response_schema['items']['properties']
+        assert 'default' not in properties['uuid_field']
 
     def test_serializer_validators(self):
         path = '/'
@@ -534,7 +712,7 @@ class TestGenerator(TestCase):
         generator = SchemaGenerator(patterns=patterns)
         generator._initialise_endpoints()
 
-        paths = generator.get_paths()
+        paths = generator.get_schema()["paths"]
 
         assert '/example/' in paths
         example_operations = paths['/example/']
@@ -551,7 +729,7 @@ class TestGenerator(TestCase):
         generator = SchemaGenerator(patterns=patterns)
         generator._initialise_endpoints()
 
-        paths = generator.get_paths()
+        paths = generator.get_schema()["paths"]
 
         assert '/v1/example/' in paths
         assert '/v1/example/{id}/' in paths
@@ -564,7 +742,7 @@ class TestGenerator(TestCase):
         generator = SchemaGenerator(patterns=patterns, url='/api')
         generator._initialise_endpoints()
 
-        paths = generator.get_paths()
+        paths = generator.get_schema()["paths"]
 
         assert '/api/example/' in paths
         assert '/api/example/{id}/' in paths
@@ -582,6 +760,15 @@ class TestGenerator(TestCase):
         assert 'openapi' in schema
         assert 'paths' in schema
 
+    def test_schema_with_no_paths(self):
+        patterns = []
+        generator = SchemaGenerator(patterns=patterns)
+
+        request = create_request('/')
+        schema = generator.get_schema(request=request)
+
+        assert schema['paths'] == {}
+
     def test_schema_information(self):
         """Construction of the top level dictionary."""
         patterns = [
@@ -595,3 +782,16 @@ class TestGenerator(TestCase):
         assert schema['info']['title'] == 'My title'
         assert schema['info']['version'] == '1.2.3'
         assert schema['info']['description'] == 'My description'
+
+    def test_schema_information_empty(self):
+        """Construction of the top level dictionary."""
+        patterns = [
+            url(r'^example/?$', views.ExampleListView.as_view()),
+        ]
+        generator = SchemaGenerator(patterns=patterns)
+
+        request = create_request('/')
+        schema = generator.get_schema(request=request)
+
+        assert schema['info']['title'] == ''
+        assert schema['info']['version'] == ''

@@ -50,7 +50,19 @@ If set, this gives the default value that will be used for the field if no input
 
 The `default` is not applied during partial update operations. In the partial update case only fields that are provided in the incoming data will have a validated value returned.
 
-May be set to a function or other callable, in which case the value will be evaluated each time it is used. When called, it will receive no arguments. If the callable has a `set_context` method, that will be called each time before getting the value with the field instance as only argument. This works the same way as for [validators](validators.md#using-set_context).
+May be set to a function or other callable, in which case the value will be evaluated each time it is used. When called, it will receive no arguments. If the callable has a `requires_context = True` attribute, then the serializer field will be passed as an argument.
+
+For example:
+
+    class CurrentUserDefault:
+        """
+        May be applied as a `default=...` value on a serializer field.
+        Returns the current user.
+        """
+        requires_context = True
+
+        def __call__(self, serializer_field):
+            return serializer_field.context['request'].user
 
 When serializing the instance, default will be used if the object attribute or dictionary key is not present in the instance.
 
@@ -585,8 +597,6 @@ The `.to_representation()` method is called to convert the initial datatype into
 
 The `to_internal_value()` method is called to restore a primitive datatype into its internal python representation. This method should raise a `serializers.ValidationError` if the data is invalid.
 
-Note that the `WritableField` class that was present in version 2.x no longer exists. You should subclass `Field` and override `to_internal_value()` if the field supports data input.
-
 ## Examples
 
 ### A Basic Custom Field
@@ -713,7 +723,7 @@ the coordinate pair:
             fields = ['label', 'coordinates']
 
 Note that this example doesn't handle validation. Partly for that reason, in a
-real project, the coordinate nesting might be better handled with a nested serialiser
+real project, the coordinate nesting might be better handled with a nested serializer
 using `source='*'`, with two `IntegerField` instances, each with their own `source`
 pointing to the relevant field.
 
@@ -746,7 +756,7 @@ suitable for updating our target object. With `source='*'`, the return from
                      ('y_coordinate', 4),
                      ('x_coordinate', 3)])
 
-For completeness lets do the same thing again but with the nested serialiser
+For completeness lets do the same thing again but with the nested serializer
 approach suggested above:
 
     class NestedCoordinateSerializer(serializers.Serializer):
@@ -768,14 +778,14 @@ declarations. It's our `NestedCoordinateSerializer` that takes `source='*'`.
 Our new `DataPointSerializer` exhibits the same behaviour as the custom field
 approach.
 
-Serialising:
+Serializing:
 
     >>> out_serializer = DataPointSerializer(instance)
     >>> out_serializer.data
     ReturnDict([('label', 'testing'),
                 ('coordinates', OrderedDict([('x', 1), ('y', 2)]))])
 
-Deserialising:
+Deserializing:
 
     >>> in_serializer = DataPointSerializer(data=data)
     >>> in_serializer.is_valid()
@@ -802,8 +812,8 @@ But we also get the built-in validation for free:
                  {'x': ['A valid integer is required.'],
                   'y': ['A valid integer is required.']})])
 
-For this reason, the nested serialiser approach would be the first to try. You
-would use the custom field approach when the nested serialiser becomes infeasible
+For this reason, the nested serializer approach would be the first to try. You
+would use the custom field approach when the nested serializer becomes infeasible
 or overly complex.
 
 

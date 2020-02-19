@@ -1,4 +1,7 @@
 import warnings
+from collections import OrderedDict
+from decimal import Decimal
+from operator import attrgetter
 from urllib.parse import urljoin
 
 from django.core.validators import (
@@ -8,7 +11,7 @@ from django.core.validators import (
 from django.db import models
 from django.utils.encoding import force_str
 
-from rest_framework import exceptions, serializers
+from rest_framework import exceptions, renderers, serializers
 from rest_framework.compat import uritemplate
 from rest_framework.fields import _UnvalidatedField, empty
 
@@ -16,15 +19,14 @@ from .generators import BaseSchemaGenerator
 from .inspectors import ViewInspector
 from .utils import get_pk_description, is_list_view
 
-# Generator
-
 
 class SchemaGenerator(BaseSchemaGenerator):
 
     def get_info(self):
+        # Title and version are required by openapi specification 3.x
         info = {
-            'title': self.title,
-            'version': self.version,
+            'title': self.title or '',
+            'version': self.version or ''
         }
 
         if self.description is not None:
@@ -32,39 +34,30 @@ class SchemaGenerator(BaseSchemaGenerator):
 
         return info
 
-    def get_paths(self, request=None):
-        result = {}
-
-        paths, view_endpoints = self._get_paths_and_endpoints(request)
-
-        # Only generate the path prefix for paths that will be included
-        if not paths:
-            return None
-
-        for path, method, view in view_endpoints:
-            if not self.has_view_permissions(path, method, view):
-                continue
-            operation = view.schema.get_operation(path, method)
-            # Normalise path for any provided mount url.
-            if path.startswith('/'):
-                path = path[1:]
-            path = urljoin(self.url or '/', path)
-
-            result.setdefault(path, {})
-            result[path][method.lower()] = operation
-
-        return result
-
     def get_schema(self, request=None, public=False):
         """
         Generate a OpenAPI schema.
         """
         self._initialise_endpoints()
 
-        paths = self.get_paths(None if public else request)
-        if not paths:
-            return None
+        # Iterate endpoints generating per method path operations.
+        # TODO: …and reference components.
+        paths = {}
+        _, view_endpoints = self._get_paths_and_endpoints(None if public else request)
+        for path, method, view in view_endpoints:
+            if not self.has_view_permissions(path, method, view):
+                continue
 
+            operation = view.schema.get_operation(path, method)
+            # Normalise path for any provided mount url.
+            if path.startswith('/'):
+                path = path[1:]
+            path = urljoin(self.url or '/', path)
+
+            paths.setdefault(path, {})
+            paths[path][method.lower()] = operation
+
+        # Compile final schema.
         schema = {
             'openapi': '3.0.2',
             'info': self.get_info(),
@@ -78,7 +71,9 @@ class SchemaGenerator(BaseSchemaGenerator):
 
 class AutoSchema(ViewInspector):
 
-    content_types = ['application/json']
+    request_media_types = []
+    response_media_types = []
+
     method_mapping = {
         'get': 'Retrieve',
         'post': 'Create',
@@ -91,6 +86,7 @@ class AutoSchema(ViewInspector):
         operation = {}
 
         operation['operationId'] = self._get_operation_id(path, method)
+        operation['description'] = self.get_description(path, method)
 
         parameters = []
         parameters += self._get_path_parameters(path, method)
@@ -123,8 +119,8 @@ class AutoSchema(ViewInspector):
             name = model.__name__
 
         # Try with the serializer class name
-        elif hasattr(self.view, 'get_serializer_class'):
-            name = self.view.get_serializer_class().__name__
+        elif self._get_serializer(path, method) is not None:
+            name = self._get_serializer(path, method).__class__.__name__
             if name.endswith('Serializer'):
                 name = name[:-10]
 
@@ -209,11 +205,39 @@ class AutoSchema(ViewInspector):
         if not is_list_view(path, method, view):
             return []
 
-        paginator = self._get_pagninator()
+        paginator = self._get_paginator()
         if not paginator:
             return []
 
         return paginator.get_schema_operation_parameters(view)
+
+    def _map_choicefield(self, field):
+        choices = list(OrderedDict.fromkeys(field.choices))  # preserve order and remove duplicates
+        if all(isinstance(choice, bool) for choice in choices):
+            type = 'boolean'
+        elif all(isinstance(choice, int) for choice in choices):
+            type = 'integer'
+        elif all(isinstance(choice, (int, float, Decimal)) for choice in choices):  # `number` includes `integer`
+            # Ref: https://tools.ietf.org/html/draft-wright-json-schema-validation-00#section-5.21
+            type = 'number'
+        elif all(isinstance(choice, str) for choice in choices):
+            type = 'string'
+        else:
+            type = None
+
+        mapping = {
+            # The value of `enum` keyword MUST be an array and SHOULD be unique.
+            # Ref: https://tools.ietf.org/html/draft-wright-json-schema-validation-00#section-5.20
+            'enum': choices
+        }
+
+        # If We figured out `type` then and only then we should set it. It must be a string.
+        # Ref: https://swagger.io/docs/specification/data-models/data-types/#mixed-type
+        # It is optional but it can not be null.
+        # Ref: https://tools.ietf.org/html/draft-wright-json-schema-validation-00#section-5.21
+        if type:
+            mapping['type'] = type
+        return mapping
 
     def _map_field(self, field):
 
@@ -248,15 +272,11 @@ class AutoSchema(ViewInspector):
         if isinstance(field, serializers.MultipleChoiceField):
             return {
                 'type': 'array',
-                'items': {
-                    'enum': list(field.choices)
-                },
+                'items': self._map_choicefield(field)
             }
 
         if isinstance(field, serializers.ChoiceField):
-            return {
-                'enum': list(field.choices),
-            }
+            return self._map_choicefield(field)
 
         # ListField.
         if isinstance(field, serializers.ListField):
@@ -265,9 +285,7 @@ class AutoSchema(ViewInspector):
                 'items': {},
             }
             if not isinstance(field.child, _UnvalidatedField):
-                mapping['items'] = {
-                    "type": self._map_field(field.child).get('type')
-                }
+                mapping['items'] = self._map_field(field.child)
             return mapping
 
         # DateField and DateTimeField type is string
@@ -337,13 +355,23 @@ class AutoSchema(ViewInspector):
                 'type': 'integer'
             }
             self._map_min_max(field, content)
+            # 2147483647 is max for int32_size, so we use int64 for format
+            if int(content.get('maximum', 0)) > 2147483647 or int(content.get('minimum', 0)) > 2147483647:
+                content['format'] = 'int64'
             return content
+
+        if isinstance(field, serializers.FileField):
+            return {
+                'type': 'string',
+                'format': 'binary'
+            }
 
         # Simplest cases, default to 'string' type:
         FIELD_CLASS_SCHEMA_TYPE = {
             serializers.BooleanField: 'boolean',
             serializers.JSONField: 'object',
             serializers.DictField: 'object',
+            serializers.HStoreField: 'object',
         }
         return {'type': FIELD_CLASS_SCHEMA_TYPE.get(field.__class__, 'string')}
 
@@ -376,7 +404,7 @@ class AutoSchema(ViewInspector):
                 schema['writeOnly'] = True
             if field.allow_null:
                 schema['nullable'] = True
-            if field.default and field.default != empty:  # why don't they use None?!
+            if field.default is not None and field.default != empty and not callable(field.default):
                 schema['default'] = field.default
             if field.help_text:
                 schema['description'] = str(field.help_text)
@@ -385,6 +413,7 @@ class AutoSchema(ViewInspector):
             properties[field.field_name] = schema
 
         result = {
+            'type': 'object',
             'properties': properties
         }
         if required:
@@ -429,14 +458,25 @@ class AutoSchema(ViewInspector):
                     schema['maximum'] = int(digits * '9') + 1
                     schema['minimum'] = -schema['maximum']
 
-    def _get_pagninator(self):
+    def _get_paginator(self):
         pagination_class = getattr(self.view, 'pagination_class', None)
         if pagination_class:
             return pagination_class()
-
         return None
 
-    def _get_serializer(self, method, path):
+    def map_parsers(self, path, method):
+        return list(map(attrgetter('media_type'), self.view.parser_classes))
+
+    def map_renderers(self, path, method):
+        media_types = []
+        for renderer in self.view.renderer_classes:
+            # BrowsableAPIRenderer not relevant to OpenAPI spec
+            if renderer == renderers.BrowsableAPIRenderer:
+                continue
+            media_types.append(renderer.media_type)
+        return media_types
+
+    def _get_serializer(self, path, method):
         view = self.view
 
         if not hasattr(view, 'get_serializer'):
@@ -455,6 +495,8 @@ class AutoSchema(ViewInspector):
         if method not in ('PUT', 'PATCH', 'POST'):
             return {}
 
+        self.request_media_types = self.map_parsers(path, method)
+
         serializer = self._get_serializer(path, method)
 
         if not isinstance(serializer, serializers.Serializer):
@@ -472,7 +514,7 @@ class AutoSchema(ViewInspector):
         return {
             'content': {
                 ct: {'schema': content}
-                for ct in self.content_types
+                for ct in self.request_media_types
             }
         }
 
@@ -484,6 +526,8 @@ class AutoSchema(ViewInspector):
                     'description': ''
                 }
             }
+
+        self.response_media_types = self.map_renderers(path, method)
 
         item_schema = {}
         serializer = self._get_serializer(path, method)
@@ -502,7 +546,7 @@ class AutoSchema(ViewInspector):
                 'type': 'array',
                 'items': item_schema,
             }
-            paginator = self._get_pagninator()
+            paginator = self._get_paginator()
             if paginator:
                 response_schema = paginator.get_paginated_response_schema(response_schema)
         else:
@@ -512,7 +556,7 @@ class AutoSchema(ViewInspector):
             '200': {
                 'content': {
                     ct: {'schema': response_schema}
-                    for ct in self.content_types
+                    for ct in self.response_media_types
                 },
                 # description is a mandatory property,
                 # https://github.com/OAI/OpenAPI-Specification/blob/master/versions/3.0.2.md#responseObject

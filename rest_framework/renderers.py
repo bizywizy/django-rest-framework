@@ -16,7 +16,6 @@ from django.core.exceptions import ImproperlyConfigured
 from django.core.paginator import Page
 from django.http.multipartparser import parse_header
 from django.template import engines, loader
-from django.test.client import encode_multipart
 from django.urls import NoReverseMatch
 from django.utils.html import mark_safe
 
@@ -902,6 +901,8 @@ class MultiPartRenderer(BaseRenderer):
     BOUNDARY = 'BoUnDaRyStRiNg'
 
     def render(self, data, accepted_media_type=None, renderer_context=None):
+        from django.test.client import encode_multipart
+
         if hasattr(data, 'items'):
             for key, value in data.items():
                 assert not isinstance(value, dict), (
@@ -1052,7 +1053,11 @@ class OpenAPIRenderer(BaseRenderer):
         assert yaml, 'Using OpenAPIRenderer, but `pyyaml` is not installed.'
 
     def render(self, data, media_type=None, renderer_context=None):
-        return yaml.dump(data, default_flow_style=False, sort_keys=False).encode('utf-8')
+        # disable yaml advanced feature 'alias' for clean, portable, and readable output
+        class Dumper(yaml.Dumper):
+            def ignore_aliases(self, data):
+                return True
+        return yaml.dump(data, default_flow_style=False, sort_keys=False, Dumper=Dumper).encode('utf-8')
 
 
 class JSONOpenAPIRenderer(BaseRenderer):

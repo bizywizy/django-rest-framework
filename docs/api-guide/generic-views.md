@@ -175,8 +175,6 @@ You can also use these hooks to provide additional validation, by raising a `Val
             raise ValidationError('You have already signed up')
         serializer.save(user=self.request.user)
 
-**Note**: These methods replace the old-style version 2.x `pre_save`, `post_save`, `pre_delete` and `post_delete` methods, which are no longer available.
-
 **Other methods**:
 
 You won't typically need to override the following methods, although you might need to call into them if you're writing custom views using `GenericAPIView`.
@@ -378,10 +376,6 @@ If you need to generic PUT-as-create behavior you may want to include something 
 
 The following third party packages provide additional generic view implementations.
 
-## Django REST Framework bulk
-
-The [django-rest-framework-bulk package][django-rest-framework-bulk] implements generic view mixins as well as some common concrete generic views to allow to apply bulk operations via API requests.
-
 ## Django Rest Multiple Models
 
 [Django Rest Multiple Models][django-rest-multiple-models] provides a generic view (and mixin) for sending multiple serialized models and/or querysets via a single API request.
@@ -394,5 +388,4 @@ The [django-rest-framework-bulk package][django-rest-framework-bulk] implements 
 [RetrieveModelMixin]: #retrievemodelmixin
 [UpdateModelMixin]: #updatemodelmixin
 [DestroyModelMixin]: #destroymodelmixin
-[django-rest-framework-bulk]: https://github.com/miki725/django-rest-framework-bulk
 [django-rest-multiple-models]: https://github.com/MattBroach/DjangoRestMultipleModels
